@@ -7,7 +7,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const sql = fs.readFileSync('./migrations/init.sql', 'utf8');
+const sql = fs.readFileSync('./migrations/update_db.sql', 'utf8');
 
 pool.query(sql)
   .then(() => {
