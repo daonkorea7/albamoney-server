@@ -5,15 +5,7 @@ const db = require('../db');
 
 // ✅ 알바처 등록 (직접입력 타입)
 router.post('/workplace/manual', async (req, res) => {
-  const {
-    user_id,
-    workplace_name,
-    hourly_wage,
-    work_days,       // 예: ["월","화","수"]
-    work_start,      // 예: "09:00"
-    work_end,        // 예: "18:00"
-  } = req.body;
-
+  const { user_id, workplace_name, hourly_wage, work_days, work_start, work_end } = req.body;
   try {
     const result = await db.query(
       `INSERT INTO staff_contracts
@@ -31,12 +23,7 @@ router.post('/workplace/manual', async (req, res) => {
 
 // ✅ 알바처 등록 (플랫폼 타입)
 router.post('/workplace/platform', async (req, res) => {
-  const {
-    user_id,
-    workplace_name,   // 예: "쿠팡이츠"
-    platform_type,    // 예: "coupang"
-  } = req.body;
-
+  const { user_id, workplace_name, platform_type } = req.body;
   try {
     const result = await db.query(
       `INSERT INTO staff_contracts
@@ -67,7 +54,6 @@ router.get('/workplace/list/:user_id', async (req, res) => {
          sc.work_end,
          sc.status,
          sc.created_at,
-         -- 이번달 수입 합산
          COALESCE(
            (SELECT SUM(pe.amount) 
             FROM platform_earnings pe 
@@ -76,7 +62,6 @@ router.get('/workplace/list/:user_id', async (req, res) => {
               AND EXTRACT(YEAR FROM pe.earned_date) = EXTRACT(YEAR FROM NOW())
            ), 0
          ) AS this_month_platform,
-         -- 이번달 근무시간 합산 (manual 타입)
          COALESCE(
            (SELECT ROUND(SUM(EXTRACT(EPOCH FROM (al.clock_out - al.clock_in))/3600)::numeric, 1)
             FROM attendance_logs al
@@ -102,10 +87,7 @@ router.get('/workplace/list/:user_id', async (req, res) => {
 router.delete('/workplace/:contract_id', async (req, res) => {
   const { contract_id } = req.params;
   try {
-    await db.query(
-      `UPDATE staff_contracts SET status = 'inactive' WHERE id = $1`,
-      [contract_id]
-    );
+    await db.query(`UPDATE staff_contracts SET status = 'inactive' WHERE id = $1`, [contract_id]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -131,10 +113,10 @@ router.post('/earnings', async (req, res) => {
 // ✅ 플랫폼 수입 목록 조회
 router.get('/earnings/:contract_id', async (req, res) => {
   const { contract_id } = req.params;
-  const { year, month } = req.query; // ?year=2026&month=4
+  const { year, month } = req.query;
   try {
     let query = `SELECT * FROM platform_earnings WHERE contract_id = $1`;
-    const params = [contract_id];
+    const params: any[] = [contract_id];
     if (year && month) {
       query += ` AND EXTRACT(YEAR FROM earned_date) = $2 AND EXTRACT(MONTH FROM earned_date) = $3`;
       params.push(year, month);
@@ -147,7 +129,7 @@ router.get('/earnings/:contract_id', async (req, res) => {
   }
 });
 
-// 기존 코드 (근로계약 관련) - 유지
+// 기존 근로계약 API
 router.post('/', async (req, res) => {
   const { user_id, workplace_id, hourly_wage, work_days } = req.body;
   try {
