@@ -1,50 +1,192 @@
+// server/routes/contract.js
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
-// 근로계약 등록
-router.post('/', async (req, res) => {
-  const { user_id, workplace_id, hourly_wage, work_days, start_date, end_date } = req.body;
+// ✅ 알바처 등록 (직접입력 타입)
+router.post('/workplace/manual', async (req, res) => {
+  const {
+    user_id,
+    workplace_name,
+    hourly_wage,
+    work_days,       // 예: ["월","화","수"]
+    work_start,      // 예: "09:00"
+    work_end,        // 예: "18:00"
+  } = req.body;
+
   try {
     const result = await db.query(
-      'INSERT INTO staff_contracts (user_id, workplace_id, hourly_wage, work_days, start_date, end_date) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-      [user_id, workplace_id, hourly_wage, work_days, start_date, end_date]
+      `INSERT INTO staff_contracts
+        (user_id, workplace_id, workplace_type, workplace_name, hourly_wage, work_days, work_start, work_end, status)
+       VALUES ($1, NULL, 'manual', $2, $3, $4, $5, $6, 'active')
+       RETURNING *`,
+      [user_id, workplace_name, hourly_wage, JSON.stringify(work_days), work_start, work_end]
     );
     res.json({ success: true, contract: result.rows[0] });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error('manual workplace error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 알바생의 계약 목록 조회
+// ✅ 알바처 등록 (플랫폼 타입)
+router.post('/workplace/platform', async (req, res) => {
+  const {
+    user_id,
+    workplace_name,   // 예: "쿠팡이츠"
+    platform_type,    // 예: "coupang"
+  } = req.body;
+
+  try {
+    const result = await db.query(
+      `INSERT INTO staff_contracts
+        (user_id, workplace_id, workplace_type, workplace_name, hourly_wage, work_days, status)
+       VALUES ($1, NULL, 'platform', $2, 0, '[]', 'active')
+       RETURNING *`,
+      [user_id, workplace_name]
+    );
+    res.json({ success: true, contract: result.rows[0] });
+  } catch (err) {
+    console.error('platform workplace error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 알바처 목록 조회 (홈 화면용)
+router.get('/workplace/list/:user_id', async (req, res) => {
+  const { user_id } = req.params;
+  try {
+    const result = await db.query(
+      `SELECT 
+         sc.id,
+         sc.workplace_type,
+         sc.workplace_name,
+         sc.hourly_wage,
+         sc.work_days,
+         sc.work_start,
+         sc.work_end,
+         sc.status,
+         sc.created_at,
+         -- 이번달 수입 합산
+         COALESCE(
+           (SELECT SUM(pe.amount) 
+            FROM platform_earnings pe 
+            WHERE pe.contract_id = sc.id
+              AND EXTRACT(MONTH FROM pe.earned_date) = EXTRACT(MONTH FROM NOW())
+              AND EXTRACT(YEAR FROM pe.earned_date) = EXTRACT(YEAR FROM NOW())
+           ), 0
+         ) AS this_month_platform,
+         -- 이번달 근무시간 합산 (manual 타입)
+         COALESCE(
+           (SELECT ROUND(SUM(EXTRACT(EPOCH FROM (al.clock_out - al.clock_in))/3600)::numeric, 1)
+            FROM attendance_logs al
+            WHERE al.contract_id = sc.id
+              AND al.status = 'approved'
+              AND EXTRACT(MONTH FROM al.clock_in) = EXTRACT(MONTH FROM NOW())
+              AND EXTRACT(YEAR FROM al.clock_in) = EXTRACT(YEAR FROM NOW())
+           ), 0
+         ) AS this_month_hours
+       FROM staff_contracts sc
+       WHERE sc.user_id = $1 AND sc.status = 'active'
+       ORDER BY sc.created_at DESC`,
+      [user_id]
+    );
+    res.json({ success: true, workplaces: result.rows });
+  } catch (err) {
+    console.error('workplace list error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 알바처 삭제 (비활성화)
+router.delete('/workplace/:contract_id', async (req, res) => {
+  const { contract_id } = req.params;
+  try {
+    await db.query(
+      `UPDATE staff_contracts SET status = 'inactive' WHERE id = $1`,
+      [contract_id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 플랫폼 수입 등록
+router.post('/earnings', async (req, res) => {
+  const { contract_id, earned_date, amount, memo } = req.body;
+  try {
+    const result = await db.query(
+      `INSERT INTO platform_earnings (contract_id, earned_date, amount, memo)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [contract_id, earned_date, amount, memo || '']
+    );
+    res.json({ success: true, earning: result.rows[0] });
+  } catch (err) {
+    console.error('earnings error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 플랫폼 수입 목록 조회
+router.get('/earnings/:contract_id', async (req, res) => {
+  const { contract_id } = req.params;
+  const { year, month } = req.query; // ?year=2026&month=4
+  try {
+    let query = `SELECT * FROM platform_earnings WHERE contract_id = $1`;
+    const params = [contract_id];
+    if (year && month) {
+      query += ` AND EXTRACT(YEAR FROM earned_date) = $2 AND EXTRACT(MONTH FROM earned_date) = $3`;
+      params.push(year, month);
+    }
+    query += ` ORDER BY earned_date DESC`;
+    const result = await db.query(query, params);
+    res.json({ success: true, earnings: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 기존 코드 (근로계약 관련) - 유지
+router.post('/', async (req, res) => {
+  const { user_id, workplace_id, hourly_wage, work_days } = req.body;
+  try {
+    const result = await db.query(
+      `INSERT INTO staff_contracts (user_id, workplace_id, hourly_wage, work_days)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [user_id, workplace_id, hourly_wage, work_days]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/worker/:user_id', async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT sc.*, w.name as workplace_name, w.address
-       FROM staff_contracts sc
-       JOIN workplaces w ON sc.workplace_id = w.id
-       WHERE sc.user_id = $1 AND sc.status = 'active'`,
+      `SELECT sc.*, w.name as workplace_name FROM staff_contracts sc
+       LEFT JOIN workplaces w ON sc.workplace_id = w.id
+       WHERE sc.user_id = $1`,
       [req.params.user_id]
     );
-    res.json({ success: true, contracts: result.rows });
+    res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 사업자의 알바생 목록 조회
 router.get('/owner/:workplace_id', async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT sc.*, u.name, u.phone
-       FROM staff_contracts sc
+      `SELECT sc.*, u.name as worker_name FROM staff_contracts sc
        JOIN users u ON sc.user_id = u.id
-       WHERE sc.workplace_id = $1 AND sc.status = 'active'`,
+       WHERE sc.workplace_id = $1`,
       [req.params.workplace_id]
     );
-    res.json({ success: true, contracts: result.rows });
+    res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
