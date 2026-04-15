@@ -116,7 +116,7 @@ router.get('/earnings/:contract_id', async (req, res) => {
   const { year, month } = req.query;
   try {
     let query = `SELECT * FROM platform_earnings WHERE contract_id = $1`;
-    const params: any[] = [contract_id];
+    const params = [contract_id];
     if (year && month) {
       query += ` AND EXTRACT(YEAR FROM earned_date) = $2 AND EXTRACT(MONTH FROM earned_date) = $3`;
       params.push(year, month);
