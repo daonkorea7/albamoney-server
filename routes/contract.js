@@ -155,7 +155,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
         AND al.clock_out IS NOT NULL
         AND al.status != 'rejected'
       WHERE sc.user_id = $1
-        AND sc.workplace_type = 'manual'
+        AND sc.workplace_type IN ('manual', 'qr')
         AND sc.status = 'active'
       GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
     `, [user_id, y, m]);
