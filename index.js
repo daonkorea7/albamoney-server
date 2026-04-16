@@ -11,6 +11,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/attendance', require('./routes/attendance'));
 app.use('/api/payroll', require('./routes/payroll'));
 app.use('/api/contract', require('./routes/contract'));
+app.use('/api/qr', require('./routes/qr'));
 
 // 서버 상태 확인
 app.get('/', (req, res) => {
