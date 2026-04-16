@@ -39,7 +39,7 @@ router.post('/workplace/platform', async (req, res) => {
   }
 });
 
-// ✅ 알바처 목록 조회 (홈 화면용)
+// ✅ 알바처 목록 조회
 router.get('/workplace/list/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
@@ -138,7 +138,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
   const m = month || (new Date().getMonth() + 1);
 
   try {
-    // 직접입력 알바처 수입 (시급 × 근무시간)
+    // 직접입력 알바처 수입
     const manualResult = await db.query(`
       SELECT 
         sc.id as contract_id,
@@ -155,7 +155,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
         AND al.clock_out IS NOT NULL
         AND al.status != 'rejected'
       WHERE sc.user_id = $1
-        AND sc.workplace_type IN ('manual', 'qr')
+        AND sc.workplace_type = 'manual'
         AND sc.status = 'active'
       GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
     `, [user_id, y, m]);
@@ -175,6 +175,28 @@ router.get('/income/monthly/:user_id', async (req, res) => {
         AND sc.workplace_type = 'platform'
         AND sc.status = 'active'
       GROUP BY sc.id, sc.workplace_name
+    `, [user_id, y, m]);
+
+    // QR 알바처 수입
+    const qrResult = await db.query(`
+      SELECT 
+        sc.id as contract_id,
+        sc.workplace_name,
+        sc.hourly_wage,
+        COALESCE(SUM(
+          EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600
+        ), 0) as total_hours
+      FROM staff_contracts sc
+      LEFT JOIN attendance_logs al 
+        ON al.contract_id = sc.id
+        AND EXTRACT(YEAR FROM al.clock_in) = $2
+        AND EXTRACT(MONTH FROM al.clock_in) = $3
+        AND al.clock_out IS NOT NULL
+        AND al.status = 'approved'
+      WHERE sc.user_id = $1
+        AND sc.workplace_type = 'qr'
+        AND sc.status = 'active'
+      GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
     `, [user_id, y, m]);
 
     // 직접입력 수입 계산
@@ -205,7 +227,22 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       };
     });
 
-    const grossTotal = manualTotal + platformTotal;
+    // QR 수입 계산
+    let qrTotal = 0;
+    const qrList = qrResult.rows.map(row => {
+      const earned = Math.round(row.hourly_wage * row.total_hours);
+      qrTotal += earned;
+      return {
+        contract_id: row.contract_id,
+        workplace_name: row.workplace_name,
+        hourly_wage: row.hourly_wage,
+        total_hours: parseFloat(row.total_hours).toFixed(1),
+        earned,
+        type: 'qr'
+      };
+    });
+
+    const grossTotal = manualTotal + platformTotal + qrTotal;
     const taxAmount = Math.round(grossTotal * 0.033);
     const netTotal = grossTotal - taxAmount;
 
@@ -215,6 +252,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       month: parseInt(m),
       manual: manualList,
       platform: platformList,
+      qr: qrList,
       summary: {
         gross_total: grossTotal,
         tax_amount: taxAmount,
