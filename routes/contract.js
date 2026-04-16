@@ -173,3 +173,101 @@ router.get('/owner/:workplace_id', async (req, res) => {
 });
 
 module.exports = router;
+
+// 이번달 수입 합산 API
+router.get('/income/monthly/:user_id', async (req, res) => {
+  const { user_id } = req.params;
+  const { year, month } = req.query;
+
+  const y = year || new Date().getFullYear();
+  const m = month || (new Date().getMonth() + 1);
+
+  try {
+    // 직접입력 알바처 수입 (시급 × 근무시간)
+    const manualResult = await db.query(`
+      SELECT 
+        sc.id as contract_id,
+        sc.workplace_name,
+        sc.hourly_wage,
+        COALESCE(SUM(
+          EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600
+        ), 0) as total_hours
+      FROM staff_contracts sc
+      LEFT JOIN attendance_logs al 
+        ON al.contract_id = sc.id
+        AND EXTRACT(YEAR FROM al.clock_in) = $3
+        AND EXTRACT(MONTH FROM al.clock_in) = $4
+        AND al.clock_out IS NOT NULL
+        AND al.status != 'rejected'
+      WHERE sc.user_id = $1
+        AND sc.workplace_type = 'manual'
+        AND sc.is_active = true
+      GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
+    `, [user_id, user_id, y, m]);
+
+    // 플랫폼 알바처 수입
+    const platformResult = await db.query(`
+      SELECT 
+        sc.id as contract_id,
+        sc.workplace_name,
+        COALESCE(SUM(pe.amount), 0) as total_amount
+      FROM staff_contracts sc
+      LEFT JOIN platform_earnings pe
+        ON pe.contract_id = sc.id
+        AND EXTRACT(YEAR FROM pe.earned_date) = $2
+        AND EXTRACT(MONTH FROM pe.earned_date) = $3
+      WHERE sc.user_id = $1
+        AND sc.workplace_type = 'platform'
+        AND sc.is_active = true
+      GROUP BY sc.id, sc.workplace_name
+    `, [user_id, y, m]);
+
+    // 직접입력 수입 계산
+    let manualTotal = 0;
+    const manualList = manualResult.rows.map(row => {
+      const earned = Math.round(row.hourly_wage * row.total_hours);
+      manualTotal += earned;
+      return {
+        contract_id: row.contract_id,
+        workplace_name: row.workplace_name,
+        hourly_wage: row.hourly_wage,
+        total_hours: parseFloat(row.total_hours).toFixed(1),
+        earned,
+        type: 'manual'
+      };
+    });
+
+    // 플랫폼 수입 계산
+    let platformTotal = 0;
+    const platformList = platformResult.rows.map(row => {
+      const amount = parseInt(row.total_amount);
+      platformTotal += amount;
+      return {
+        contract_id: row.contract_id,
+        workplace_name: row.workplace_name,
+        total_amount: amount,
+        type: 'platform'
+      };
+    });
+
+    const grossTotal = manualTotal + platformTotal;
+    const taxAmount = Math.round(grossTotal * 0.033);
+    const netTotal = grossTotal - taxAmount;
+
+    res.json({
+      success: true,
+      year: parseInt(y),
+      month: parseInt(m),
+      manual: manualList,
+      platform: platformList,
+      summary: {
+        gross_total: grossTotal,
+        tax_amount: taxAmount,
+        net_total: netTotal
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
