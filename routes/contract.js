@@ -129,52 +129,7 @@ router.get('/earnings/:contract_id', async (req, res) => {
   }
 });
 
-// 기존 근로계약 API
-router.post('/', async (req, res) => {
-  const { user_id, workplace_id, hourly_wage, work_days } = req.body;
-  try {
-    const result = await db.query(
-      `INSERT INTO staff_contracts (user_id, workplace_id, hourly_wage, work_days)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [user_id, workplace_id, hourly_wage, work_days]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/worker/:user_id', async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT sc.*, w.name as workplace_name FROM staff_contracts sc
-       LEFT JOIN workplaces w ON sc.workplace_id = w.id
-       WHERE sc.user_id = $1`,
-      [req.params.user_id]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/owner/:workplace_id', async (req, res) => {
-  try {
-    const result = await db.query(
-      `SELECT sc.*, u.name as worker_name FROM staff_contracts sc
-       JOIN users u ON sc.user_id = u.id
-       WHERE sc.workplace_id = $1`,
-      [req.params.workplace_id]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-module.exports = router;
-
-// 이번달 수입 합산 API
+// ✅ 이번달 수입 합산 API
 router.get('/income/monthly/:user_id', async (req, res) => {
   const { user_id } = req.params;
   const { year, month } = req.query;
@@ -195,15 +150,15 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       FROM staff_contracts sc
       LEFT JOIN attendance_logs al 
         ON al.contract_id = sc.id
-        AND EXTRACT(YEAR FROM al.clock_in) = $3
-        AND EXTRACT(MONTH FROM al.clock_in) = $4
+        AND EXTRACT(YEAR FROM al.clock_in) = $2
+        AND EXTRACT(MONTH FROM al.clock_in) = $3
         AND al.clock_out IS NOT NULL
         AND al.status != 'rejected'
       WHERE sc.user_id = $1
         AND sc.workplace_type = 'manual'
-        AND sc.is_active = true
+        AND sc.status = 'active'
       GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
-    `, [user_id, user_id, y, m]);
+    `, [user_id, y, m]);
 
     // 플랫폼 알바처 수입
     const platformResult = await db.query(`
@@ -218,7 +173,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
         AND EXTRACT(MONTH FROM pe.earned_date) = $3
       WHERE sc.user_id = $1
         AND sc.workplace_type = 'platform'
-        AND sc.is_active = true
+        AND sc.status = 'active'
       GROUP BY sc.id, sc.workplace_name
     `, [user_id, y, m]);
 
@@ -271,3 +226,49 @@ router.get('/income/monthly/:user_id', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// 기존 근로계약 API
+router.post('/', async (req, res) => {
+  const { user_id, workplace_id, hourly_wage, work_days } = req.body;
+  try {
+    const result = await db.query(
+      `INSERT INTO staff_contracts (user_id, workplace_id, hourly_wage, work_days)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [user_id, workplace_id, hourly_wage, work_days]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/worker/:user_id', async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT sc.*, w.name as workplace_name FROM staff_contracts sc
+       LEFT JOIN workplaces w ON sc.workplace_id = w.id
+       WHERE sc.user_id = $1`,
+      [req.params.user_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/owner/:workplace_id', async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT sc.*, u.name as worker_name FROM staff_contracts sc
+       JOIN users u ON sc.user_id = u.id
+       WHERE sc.workplace_id = $1`,
+      [req.params.workplace_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 항상 맨 마지막에!
+module.exports = router;
