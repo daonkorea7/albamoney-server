@@ -39,14 +39,16 @@ router.post('/workplace/platform', async (req, res) => {
   }
 });
 
-// ✅ 알바처 목록 조회
+// ✅ 알바처 목록 조회 (workplaces JOIN으로 attendance_mode 포함)
 router.get('/workplace/list/:user_id', async (req, res) => {
   const { user_id } = req.params;
   try {
     const result = await db.query(
       `SELECT 
          sc.id,
-         sc.workplace_type,
+         sc.id AS contract_id,
+         sc.workplace_id,
+         sc.workplace_type AS type,
          sc.workplace_name,
          sc.hourly_wage,
          sc.work_days,
@@ -54,6 +56,8 @@ router.get('/workplace/list/:user_id', async (req, res) => {
          sc.work_end,
          sc.status,
          sc.created_at,
+         w.attendance_mode,
+         w.qr_code,
          COALESCE(
            (SELECT SUM(pe.amount) 
             FROM platform_earnings pe 
@@ -72,6 +76,7 @@ router.get('/workplace/list/:user_id', async (req, res) => {
            ), 0
          ) AS this_month_hours
        FROM staff_contracts sc
+       LEFT JOIN workplaces w ON sc.workplace_id = w.id
        WHERE sc.user_id = $1 AND sc.status = 'active'
        ORDER BY sc.created_at DESC`,
       [user_id]
