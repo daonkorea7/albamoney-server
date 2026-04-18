@@ -308,5 +308,22 @@ router.get('/owner/:workplace_id', async (req, res) => {
   }
 });
 
+
+// ✅ 알바처 시급 수정
+router.put('/workplace/:contract_id', async (req, res) => {
+  const { contract_id } = req.params;
+  const { hourly_wage } = req.body;
+  try {
+    await db.query(
+      `UPDATE staff_contracts SET hourly_wage = $1 WHERE id = $2`,
+      [hourly_wage, contract_id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ✅ 항상 맨 마지막에!
 module.exports = router;
