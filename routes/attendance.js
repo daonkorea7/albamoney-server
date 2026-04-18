@@ -7,10 +7,8 @@ const db = require('../db');
 router.post('/checkin', async (req, res) => {
   const { contract_id, method, clock_in } = req.body;
   try {
-    // clock_in이 있으면 사용, 없으면 현재 시간
     const clockInTime = clock_in || new Date().toISOString();
 
-    // 오늘 이미 출근 기록이 있는지 확인
     const today = new Date().toISOString().substring(0, 10);
     const existing = await db.query(
       `SELECT id FROM attendance_logs 
@@ -36,15 +34,33 @@ router.post('/checkin', async (req, res) => {
   }
 });
 
-// ✅ 퇴근 체크
+// ✅ 퇴근 체크 (수동 시간 + status 받기 가능)
 router.put('/checkout/:id', async (req, res) => {
-  const { clock_out } = req.body;
+  const { clock_out, clock_out_time, status } = req.body;
   try {
-    const clockOutTime = clock_out || new Date().toISOString();
-    const result = await db.query(
-      `UPDATE attendance_logs SET clock_out = $1 WHERE id = $2 RETURNING *`,
-      [clockOutTime, req.params.id]
-    );
+    let clockOutTime;
+
+    // 수동 입력인 경우: 오늘 날짜 + 입력 시간
+    if (clock_out_time) {
+      const today = new Date().toISOString().substring(0, 10);
+      clockOutTime = `${today}T${clock_out_time}:00`;
+    } else {
+      clockOutTime = clock_out || new Date().toISOString();
+    }
+
+    // status 업데이트 여부에 따라 분기
+    let result;
+    if (status) {
+      result = await db.query(
+        `UPDATE attendance_logs SET clock_out = $1, status = $2 WHERE id = $3 RETURNING *`,
+        [clockOutTime, status, req.params.id]
+      );
+    } else {
+      result = await db.query(
+        `UPDATE attendance_logs SET clock_out = $1 WHERE id = $2 RETURNING *`,
+        [clockOutTime, req.params.id]
+      );
+    }
     res.json({ success: true, ...result.rows[0] });
   } catch (err) {
     console.error('checkout error:', err);
@@ -82,19 +98,24 @@ router.put('/approve/:id', async (req, res) => {
       `UPDATE attendance_logs SET status = $1 WHERE id = $2 RETURNING *`,
       [status, req.params.id]
     );
-    res.json(result.rows[0]);
+    res.json({ success: true, ...result.rows[0] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ✅ 날짜+시간 지정 출퇴근 저장 (manual-checkin에서 사용)
+// ✅ 날짜+시간 지정 출퇴근 저장 (null 처리 개선)
 router.post('/save-day', async (req, res) => {
   const { contract_id, date, clock_in_time, clock_out_time, status } = req.body;
-  // date: "2026-04-15", clock_in_time: "09:00", clock_out_time: "18:00"
   try {
+    // clock_in_time이 없으면 에러
+    if (!clock_in_time) {
+      return res.status(400).json({ error: '출근 시간이 필요합니다' });
+    }
+
     const clockIn = `${date}T${clock_in_time}:00`;
-    const clockOut = `${date}T${clock_out_time}:00`;
+    // clock_out_time이 null이면 clockOut도 null로
+    const clockOut = clock_out_time ? `${date}T${clock_out_time}:00` : null;
 
     // 같은 날 기록이 있으면 업데이트, 없으면 삽입
     const existing = await db.query(
@@ -124,16 +145,14 @@ router.post('/save-day', async (req, res) => {
   }
 });
 
-// ===================================================================
-// 승인 대기 + 처리 완료 출퇴근 목록 조회 (사업자용)
+// ✅ 승인 대기 + 처리 완료 출퇴근 목록 조회 (사업자용)
 // GET /api/attendance/pending/:business_id
-// ===================================================================
 router.get('/pending/:business_id', async (req, res) => {
   try {
     const { business_id } = req.params;
 
     // 승인 대기 목록 (status = 'pending')
-    const pendingResult = await pool.query(`
+    const pendingResult = await db.query(`
       SELECT 
         al.id,
         al.contract_id,
@@ -161,7 +180,7 @@ router.get('/pending/:business_id', async (req, res) => {
     `, [business_id]);
 
     // 처리 완료 목록 (최근 10건)
-    const doneResult = await pool.query(`
+    const doneResult = await db.query(`
       SELECT 
         al.id,
         al.contract_id,
@@ -193,7 +212,5 @@ router.get('/pending/:business_id', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
-
 
 module.exports = router;
