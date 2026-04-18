@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 
-// 1. 내 사업장에 등록된 알바생 목록 조회
+// 1. 내 사업장에 등록된 알바생 목록 조회 (시간대 정보 포함)
 router.get('/list/:business_id', async (req, res) => {
   try {
     const { business_id } = req.params;
@@ -15,10 +15,14 @@ router.get('/list/:business_id', async (req, res) => {
         sc.hourly_wage,
         sc.work_days,
         sc.status,
+        sc.shift_id,
         sc.created_at,
         u.name AS worker_name,
         u.phone AS worker_phone,
         w.name AS workplace_name,
+        ws.name AS shift_name,
+        ws.start_time AS shift_start_time,
+        ws.end_time AS shift_end_time,
         (
           SELECT COALESCE(SUM(
             EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600
@@ -39,6 +43,7 @@ router.get('/list/:business_id', async (req, res) => {
       FROM staff_contracts sc
       JOIN users u ON sc.user_id = u.id
       JOIN workplaces w ON sc.workplace_id = w.id
+      LEFT JOIN workplace_shifts ws ON sc.shift_id = ws.id
       WHERE w.business_id = $1
       ORDER BY sc.created_at DESC
     `, [business_id]);
@@ -50,7 +55,7 @@ router.get('/list/:business_id', async (req, res) => {
   }
 });
 
-// 2. 알바생 상세 정보 조회 (이번달 출퇴근 기록 포함)
+// 2. 알바생 상세 정보 조회 (이번달 출퇴근 기록 + 시간대 포함)
 router.get('/detail/:contract_id', async (req, res) => {
   try {
     const { contract_id } = req.params;
@@ -60,10 +65,14 @@ router.get('/detail/:contract_id', async (req, res) => {
         sc.*,
         u.name AS worker_name,
         u.phone AS worker_phone,
-        w.name AS workplace_name
+        w.name AS workplace_name,
+        ws.name AS shift_name,
+        ws.start_time AS shift_start_time,
+        ws.end_time AS shift_end_time
       FROM staff_contracts sc
       JOIN users u ON sc.user_id = u.id
       JOIN workplaces w ON sc.workplace_id = w.id
+      LEFT JOIN workplace_shifts ws ON sc.shift_id = ws.id
       WHERE sc.id = $1
     `, [contract_id]);
 
@@ -104,14 +113,66 @@ router.put('/status/:contract_id', async (req, res) => {
       RETURNING *
     `, [status, contract_id]);
 
-    res.json({ success: true, contract: result.rows[0] });
+    res.json({ 
+      success: true, 
+      contract: result.rows[0],
+      message: status === 'active' ? '활성화되었습니다' : '비활성화되었습니다'
+    });
   } catch (err) {
     console.error('알바생 상태 변경 에러:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 4. 알바생 해고 (계약 삭제)
+// 4. 알바생 시간대 배정/변경/해제 (신규 v9)
+router.put('/shift/:contract_id', async (req, res) => {
+  try {
+    const { contract_id } = req.params;
+    const { shift_id } = req.body;  // null이면 자유 근무로 해제
+
+    // shift_id가 있으면 해당 시간대가 이 알바의 사업장 소속인지 검증
+    if (shift_id !== null && shift_id !== undefined) {
+      const checkResult = await pool.query(`
+        SELECT ws.id
+        FROM workplace_shifts ws
+        JOIN staff_contracts sc ON ws.workplace_id = sc.workplace_id
+        WHERE ws.id = $1 AND sc.id = $2
+      `, [shift_id, contract_id]);
+
+      if (checkResult.rows.length === 0) {
+        return res.status(400).json({ 
+          success: false, 
+          error: '이 알바생의 사업장에 존재하지 않는 시간대입니다' 
+        });
+      }
+    }
+
+    const result = await pool.query(`
+      UPDATE staff_contracts
+      SET shift_id = $1
+      WHERE id = $2
+      RETURNING *
+    `, [shift_id || null, contract_id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: '알바생을 찾을 수 없습니다' 
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      contract: result.rows[0],
+      message: shift_id ? '시간대가 배정됐어요' : '자유 근무로 변경됐어요'
+    });
+  } catch (err) {
+    console.error('알바생 시간대 변경 에러:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. 알바생 해고 (계약 삭제)
 router.delete('/:contract_id', async (req, res) => {
   try {
     const { contract_id } = req.params;
