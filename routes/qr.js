@@ -8,7 +8,6 @@ const crypto = require('crypto');
 router.post('/business/register', async (req, res) => {
   const { user_id, business_name, business_number } = req.body;
   try {
-    // 이미 등록된 사업자인지 확인
     const existing = await db.query(
       `SELECT * FROM businesses WHERE owner_id = $1`,
       [user_id]
@@ -17,7 +16,6 @@ router.post('/business/register', async (req, res) => {
       return res.json({ success: true, business: existing.rows[0] });
     }
 
-    // 새 사업자 등록
     const result = await db.query(
       `INSERT INTO businesses (owner_id, name, biz_number)
        VALUES ($1, $2, $3) RETURNING *`,
@@ -49,12 +47,16 @@ router.get('/business/:user_id', async (req, res) => {
   }
 });
 
-// ✅ 사업장 + QR 코드 발급
-// attendance_mode: 'qr' | 'manual' | 'both' (기본값: 'qr')
+// ✅ 사업장 + QR 코드 발급 (Grace Period 포함)
 router.post('/workplace/create', async (req, res) => {
-  const { user_id, workplace_name, attendance_mode } = req.body;
+  const { 
+    user_id, 
+    workplace_name, 
+    attendance_mode,
+    grace_enabled,
+    grace_minutes 
+  } = req.body;
   try {
-    // 사업자 정보 확인
     const bizResult = await db.query(
       `SELECT * FROM businesses WHERE owner_id = $1`,
       [user_id]
@@ -64,18 +66,20 @@ router.post('/workplace/create', async (req, res) => {
     }
     const business = bizResult.rows[0];
 
-    // 출퇴근 방식 검증
     const validModes = ['qr', 'manual', 'both'];
     const mode = validModes.includes(attendance_mode) ? attendance_mode : 'qr';
 
-    // QR 코드 고유값 생성
     const qrCode = crypto.randomBytes(16).toString('hex');
 
-    // 사업장 생성
+    // Grace Period 기본값 처리
+    const graceEnabled = grace_enabled === true;
+    const graceMinutes = graceEnabled ? (parseInt(grace_minutes) || 10) : 0;
+
     const result = await db.query(
-      `INSERT INTO workplaces (business_id, name, qr_code, qr_issued_at, attendance_mode)
-       VALUES ($1, $2, $3, NOW(), $4) RETURNING *`,
-      [business.id, workplace_name, qrCode, mode]
+      `INSERT INTO workplaces 
+        (business_id, name, qr_code, qr_issued_at, attendance_mode, grace_enabled, grace_minutes)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6) RETURNING *`,
+      [business.id, workplace_name, qrCode, mode, graceEnabled, graceMinutes]
     );
 
     const workplace = result.rows[0];
@@ -95,12 +99,13 @@ router.post('/workplace/create', async (req, res) => {
   }
 });
 
-// ✅ 사업장 목록 조회 (attendance_mode 자동 포함)
+// ✅ 사업장 목록 조회 (Grace Period 자동 포함)
 router.get('/workplace/list/:user_id', async (req, res) => {
   try {
     const result = await db.query(
       `SELECT w.*,
-        (SELECT COUNT(*) FROM staff_contracts sc WHERE sc.workplace_id = w.id AND sc.status = 'active') as staff_count
+        (SELECT COUNT(*) FROM staff_contracts sc WHERE sc.workplace_id = w.id AND sc.status = 'active') as staff_count,
+        (SELECT COUNT(*) FROM workplace_shifts ws WHERE ws.workplace_id = w.id) as shift_count
        FROM workplaces w
        JOIN businesses b ON w.business_id = b.id
        WHERE b.owner_id = $1
@@ -113,9 +118,7 @@ router.get('/workplace/list/:user_id', async (req, res) => {
   }
 });
 
-// ✅ 사업장 출퇴근 방식 변경 (신규)
-// PUT /api/qr/workplace/:workplace_id/mode
-// Body: { attendance_mode: 'qr' | 'manual' | 'both' }
+// ✅ 사업장 출퇴근 방식 변경
 router.put('/workplace/:workplace_id/mode', async (req, res) => {
   try {
     const { workplace_id } = req.params;
@@ -151,11 +154,44 @@ router.put('/workplace/:workplace_id/mode', async (req, res) => {
   }
 });
 
+// ✅ 사업장 Grace Period 변경 (신규)
+// PUT /api/qr/workplace/:workplace_id/grace
+// Body: { grace_enabled: boolean, grace_minutes: number }
+router.put('/workplace/:workplace_id/grace', async (req, res) => {
+  try {
+    const { workplace_id } = req.params;
+    const { grace_enabled, grace_minutes } = req.body;
+
+    const enabled = grace_enabled === true;
+    const minutes = enabled ? (parseInt(grace_minutes) || 10) : 0;
+
+    const result = await db.query(
+      `UPDATE workplaces 
+       SET grace_enabled = $1, grace_minutes = $2
+       WHERE id = $3 
+       RETURNING *`,
+      [enabled, minutes, workplace_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: '사업장을 찾을 수 없습니다' });
+    }
+
+    res.json({ 
+      success: true, 
+      workplace: result.rows[0],
+      message: '여유시간 설정이 변경되었습니다'
+    });
+  } catch (err) {
+    console.error('grace update error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ✅ QR 스캔으로 알바처 연결 (알바생용)
 router.post('/workplace/connect', async (req, res) => {
-  const { user_id, workplace_id, qr_code } = req.body;
+  const { user_id, workplace_id, qr_code, shift_id } = req.body;
   try {
-    // QR 코드 유효성 확인
     const wpResult = await db.query(
       `SELECT * FROM workplaces WHERE id = $1 AND qr_code = $2`,
       [workplace_id, qr_code]
@@ -165,7 +201,6 @@ router.post('/workplace/connect', async (req, res) => {
     }
     const workplace = wpResult.rows[0];
 
-    // 이미 연결됐는지 확인
     const existing = await db.query(
       `SELECT * FROM staff_contracts 
        WHERE user_id = $1 AND workplace_id = $2 AND status = 'active'`,
@@ -175,13 +210,12 @@ router.post('/workplace/connect', async (req, res) => {
       return res.json({ success: true, message: '이미 연결된 알바처입니다', contract: existing.rows[0] });
     }
 
-    // 근로계약 생성
     const result = await db.query(
       `INSERT INTO staff_contracts 
-        (user_id, workplace_id, workplace_type, workplace_name, hourly_wage, work_days, status)
-       VALUES ($1, $2, 'qr', $3, 0, '[]', 'active')
+        (user_id, workplace_id, workplace_type, workplace_name, hourly_wage, work_days, status, shift_id)
+       VALUES ($1, $2, 'qr', $3, 0, '[]', 'active', $4)
        RETURNING *`,
-      [user_id, workplace_id, workplace.name]
+      [user_id, workplace_id, workplace.name, shift_id || null]
     );
 
     res.json({ 

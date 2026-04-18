@@ -13,7 +13,8 @@ app.use('/api/attendance', require('./routes/attendance'));
 app.use('/api/payroll', require('./routes/payroll'));
 app.use('/api/contract', require('./routes/contract'));
 app.use('/api/qr', require('./routes/qr'));
-app.use('/api/staff', require('./routes/staff'));  // ✅ 통일
+app.use('/api/staff', require('./routes/staff'));
+app.use('/api/shift', require('./routes/shift'));  // ✅ 신규 추가!
 
 // 서버 상태 확인
 app.get('/', (req, res) => {
