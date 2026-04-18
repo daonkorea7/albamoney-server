@@ -124,4 +124,76 @@ router.post('/save-day', async (req, res) => {
   }
 });
 
+// ===================================================================
+// 승인 대기 + 처리 완료 출퇴근 목록 조회 (사업자용)
+// GET /api/attendance/pending/:business_id
+// ===================================================================
+router.get('/pending/:business_id', async (req, res) => {
+  try {
+    const { business_id } = req.params;
+
+    // 승인 대기 목록 (status = 'pending')
+    const pendingResult = await pool.query(`
+      SELECT 
+        al.id,
+        al.contract_id,
+        al.clock_in,
+        al.clock_out,
+        al.method,
+        al.status,
+        al.created_at,
+        u.name AS worker_name,
+        u.phone AS worker_phone,
+        w.name AS workplace_name,
+        sc.hourly_wage,
+        CASE 
+          WHEN al.clock_out IS NOT NULL 
+          THEN EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600
+          ELSE 0
+        END AS hours_worked
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      JOIN users u ON sc.user_id = u.id
+      JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE w.business_id = $1
+        AND al.status = 'pending'
+      ORDER BY al.created_at DESC
+    `, [business_id]);
+
+    // 처리 완료 목록 (최근 10건)
+    const doneResult = await pool.query(`
+      SELECT 
+        al.id,
+        al.contract_id,
+        al.clock_in,
+        al.clock_out,
+        al.method,
+        al.status,
+        al.created_at,
+        u.name AS worker_name,
+        w.name AS workplace_name
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      JOIN users u ON sc.user_id = u.id
+      JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE w.business_id = $1
+        AND al.status IN ('approved', 'rejected')
+        AND al.method = 'manual'
+      ORDER BY al.created_at DESC
+      LIMIT 10
+    `, [business_id]);
+
+    res.json({ 
+      success: true, 
+      pending: pendingResult.rows,
+      done: doneResult.rows
+    });
+  } catch (err) {
+    console.error('승인 목록 조회 에러:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
+
 module.exports = router;
