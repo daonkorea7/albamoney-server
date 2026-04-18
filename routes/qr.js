@@ -50,8 +50,9 @@ router.get('/business/:user_id', async (req, res) => {
 });
 
 // ✅ 사업장 + QR 코드 발급
+// attendance_mode: 'qr' | 'manual' | 'both' (기본값: 'qr')
 router.post('/workplace/create', async (req, res) => {
-  const { user_id, workplace_name } = req.body;
+  const { user_id, workplace_name, attendance_mode } = req.body;
   try {
     // 사업자 정보 확인
     const bizResult = await db.query(
@@ -63,14 +64,18 @@ router.post('/workplace/create', async (req, res) => {
     }
     const business = bizResult.rows[0];
 
+    // 출퇴근 방식 검증
+    const validModes = ['qr', 'manual', 'both'];
+    const mode = validModes.includes(attendance_mode) ? attendance_mode : 'qr';
+
     // QR 코드 고유값 생성
     const qrCode = crypto.randomBytes(16).toString('hex');
 
     // 사업장 생성
     const result = await db.query(
-      `INSERT INTO workplaces (business_id, name, qr_code, qr_issued_at)
-       VALUES ($1, $2, $3, NOW()) RETURNING *`,
-      [business.id, workplace_name, qrCode]
+      `INSERT INTO workplaces (business_id, name, qr_code, qr_issued_at, attendance_mode)
+       VALUES ($1, $2, $3, NOW(), $4) RETURNING *`,
+      [business.id, workplace_name, qrCode, mode]
     );
 
     const workplace = result.rows[0];
@@ -90,7 +95,7 @@ router.post('/workplace/create', async (req, res) => {
   }
 });
 
-// ✅ 사업장 목록 조회
+// ✅ 사업장 목록 조회 (attendance_mode 자동 포함)
 router.get('/workplace/list/:user_id', async (req, res) => {
   try {
     const result = await db.query(
@@ -104,6 +109,44 @@ router.get('/workplace/list/:user_id', async (req, res) => {
     );
     res.json({ success: true, workplaces: result.rows });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 사업장 출퇴근 방식 변경 (신규)
+// PUT /api/qr/workplace/:workplace_id/mode
+// Body: { attendance_mode: 'qr' | 'manual' | 'both' }
+router.put('/workplace/:workplace_id/mode', async (req, res) => {
+  try {
+    const { workplace_id } = req.params;
+    const { attendance_mode } = req.body;
+
+    const validModes = ['qr', 'manual', 'both'];
+    if (!validModes.includes(attendance_mode)) {
+      return res.status(400).json({ 
+        error: 'attendance_mode는 qr, manual, both 중 하나여야 합니다' 
+      });
+    }
+
+    const result = await db.query(
+      `UPDATE workplaces 
+       SET attendance_mode = $1 
+       WHERE id = $2 
+       RETURNING *`,
+      [attendance_mode, workplace_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: '사업장을 찾을 수 없습니다' });
+    }
+
+    res.json({ 
+      success: true, 
+      workplace: result.rows[0],
+      message: '출퇴근 방식이 변경되었습니다'
+    });
+  } catch (err) {
+    console.error('attendance mode update error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -141,7 +184,12 @@ router.post('/workplace/connect', async (req, res) => {
       [user_id, workplace_id, workplace.name]
     );
 
-    res.json({ success: true, contract: result.rows[0], workplace_name: workplace.name });
+    res.json({ 
+      success: true, 
+      contract: result.rows[0], 
+      workplace_name: workplace.name,
+      attendance_mode: workplace.attendance_mode || 'qr'
+    });
   } catch (err) {
     console.error('workplace connect error:', err);
     res.status(500).json({ error: err.message });
