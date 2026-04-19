@@ -3,6 +3,35 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
+// =========================================================
+// 🆕 [v10 헬퍼] shift_id로 예정 시간 가져오기
+// =========================================================
+// staff_contracts.shift_id → workplace_shifts 에서 start_time/end_time 조회
+// 시간대가 없거나 자유근무면 null 반환
+async function getScheduledTimes(contract_id, date) {
+  try {
+    const result = await db.query(`
+      SELECT ws.start_time, ws.end_time
+      FROM staff_contracts sc
+      LEFT JOIN workplace_shifts ws ON sc.shift_id = ws.id
+      WHERE sc.id = $1
+    `, [contract_id]);
+
+    if (result.rows.length === 0 || !result.rows[0].start_time) {
+      return { scheduled_in: null, scheduled_out: null };
+    }
+
+    const { start_time, end_time } = result.rows[0];
+    return {
+      scheduled_in: `${date}T${start_time}`,    // "2026-04-19T09:00:00"
+      scheduled_out: `${date}T${end_time}`,
+    };
+  } catch (err) {
+    console.error('getScheduledTimes error:', err);
+    return { scheduled_in: null, scheduled_out: null };
+  }
+}
+
 // ✅ 출근 체크
 router.post('/checkin', async (req, res) => {
   const { contract_id, method, clock_in } = req.body;
@@ -22,10 +51,19 @@ router.post('/checkin', async (req, res) => {
       return res.json({ success: true, id: existing.rows[0].id, message: '이미 출근 기록이 있어요' });
     }
 
+    // 🆕 v10: 예정 시간 가져오기 (shift 기반)
+    const { scheduled_in, scheduled_out } = await getScheduledTimes(contract_id, today);
+
+    // 🆕 v10: billable = actual (일단 실제와 동일, Grace 로직은 다음 단계)
     const result = await db.query(
-      `INSERT INTO attendance_logs (contract_id, clock_in, method, status)
-       VALUES ($1, $2, $3, 'approved') RETURNING *`,
-      [contract_id, clockInTime, method || 'manual']
+      `INSERT INTO attendance_logs 
+        (contract_id, clock_in, method, status, 
+         scheduled_clock_in, scheduled_clock_out,
+         billable_clock_in)
+       VALUES ($1, $2, $3, 'approved', $4, $5, $6) 
+       RETURNING *`,
+      [contract_id, clockInTime, method || 'manual', 
+       scheduled_in, scheduled_out, clockInTime]
     );
     res.json({ success: true, ...result.rows[0] });
   } catch (err) {
@@ -48,16 +86,20 @@ router.put('/checkout/:id', async (req, res) => {
       clockOutTime = clock_out || new Date().toISOString();
     }
 
-    // status 업데이트 여부에 따라 분기
+    // 🆕 v10: billable_clock_out도 함께 업데이트 (일단 actual과 동일)
     let result;
     if (status) {
       result = await db.query(
-        `UPDATE attendance_logs SET clock_out = $1, status = $2 WHERE id = $3 RETURNING *`,
+        `UPDATE attendance_logs 
+         SET clock_out = $1, billable_clock_out = $1, status = $2 
+         WHERE id = $3 RETURNING *`,
         [clockOutTime, status, req.params.id]
       );
     } else {
       result = await db.query(
-        `UPDATE attendance_logs SET clock_out = $1 WHERE id = $2 RETURNING *`,
+        `UPDATE attendance_logs 
+         SET clock_out = $1, billable_clock_out = $1 
+         WHERE id = $2 RETURNING *`,
         [clockOutTime, req.params.id]
       );
     }
@@ -117,6 +159,13 @@ router.post('/save-day', async (req, res) => {
     // clock_out_time이 null이면 clockOut도 null로
     const clockOut = clock_out_time ? `${date}T${clock_out_time}:00` : null;
 
+    // 🆕 v10: 예정 시간 가져오기 (shift 기반)
+    const { scheduled_in, scheduled_out } = await getScheduledTimes(contract_id, date);
+
+    // 🆕 v10: billable = actual (일단 실제와 동일, Grace 로직은 다음 단계)
+    const billableIn = clockIn;
+    const billableOut = clockOut;
+
     // 같은 날 기록이 있으면 업데이트, 없으면 삽입
     const existing = await db.query(
       `SELECT id FROM attendance_logs WHERE contract_id = $1 AND DATE(clock_in) = $2`,
@@ -127,15 +176,26 @@ router.post('/save-day', async (req, res) => {
     if (existing.rows.length > 0) {
       result = await db.query(
         `UPDATE attendance_logs 
-         SET clock_in = $1, clock_out = $2, status = $3
-         WHERE id = $4 RETURNING *`,
-        [clockIn, clockOut, status || 'approved', existing.rows[0].id]
+         SET clock_in = $1, clock_out = $2, status = $3,
+             scheduled_clock_in = $4, scheduled_clock_out = $5,
+             billable_clock_in = $6, billable_clock_out = $7
+         WHERE id = $8 RETURNING *`,
+        [clockIn, clockOut, status || 'approved',
+         scheduled_in, scheduled_out,
+         billableIn, billableOut,
+         existing.rows[0].id]
       );
     } else {
       result = await db.query(
-        `INSERT INTO attendance_logs (contract_id, clock_in, clock_out, method, status)
-         VALUES ($1, $2, $3, 'manual', $4) RETURNING *`,
-        [contract_id, clockIn, clockOut, status || 'approved']
+        `INSERT INTO attendance_logs 
+          (contract_id, clock_in, clock_out, method, status,
+           scheduled_clock_in, scheduled_clock_out,
+           billable_clock_in, billable_clock_out)
+         VALUES ($1, $2, $3, 'manual', $4, $5, $6, $7, $8) 
+         RETURNING *`,
+        [contract_id, clockIn, clockOut, status || 'approved',
+         scheduled_in, scheduled_out,
+         billableIn, billableOut]
       );
     }
     res.json({ success: true, log: result.rows[0] });
@@ -161,6 +221,10 @@ router.get('/pending/:business_id', async (req, res) => {
         al.method,
         al.status,
         al.created_at,
+        al.scheduled_clock_in,
+        al.scheduled_clock_out,
+        al.billable_clock_in,
+        al.billable_clock_out,
         u.name AS worker_name,
         u.phone AS worker_phone,
         w.name AS workplace_name,
@@ -189,6 +253,10 @@ router.get('/pending/:business_id', async (req, res) => {
         al.method,
         al.status,
         al.created_at,
+        al.scheduled_clock_in,
+        al.scheduled_clock_out,
+        al.billable_clock_in,
+        al.billable_clock_out,
         u.name AS worker_name,
         w.name AS workplace_name
       FROM attendance_logs al
