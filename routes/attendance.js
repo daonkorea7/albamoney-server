@@ -214,16 +214,62 @@ router.get('/:contract_id', async (req, res) => {
   }
 });
 
-// ✅ 수동 출퇴근 승인/거절
+// ✅ 수동 출퇴근 승인/거절 (v10: 시간 결정 옵션 추가)
+// Body: { 
+//   status: 'approved' | 'rejected',
+//   clock_in_decision?: 'scheduled' | 'actual',   // 지각자 결정
+//   clock_out_decision?: 'scheduled' | 'actual'   // 연장/조퇴자 결정
+// }
 router.put('/approve/:id', async (req, res) => {
-  const { status } = req.body;
+  const { status, clock_in_decision, clock_out_decision } = req.body;
   try {
-    const result = await db.query(
-      `UPDATE attendance_logs SET status = $1 WHERE id = $2 RETURNING *`,
-      [status, req.params.id]
+    // 기존 log 정보 가져오기
+    const logResult = await db.query(
+      `SELECT clock_in, clock_out, scheduled_clock_in, scheduled_clock_out,
+              billable_clock_in, billable_clock_out,
+              is_late, is_early_leave, is_overtime
+       FROM attendance_logs WHERE id = $1`,
+      [req.params.id]
     );
+
+    if (logResult.rows.length === 0) {
+      return res.status(404).json({ error: '출근 기록을 찾을 수 없어요' });
+    }
+
+    const log = logResult.rows[0];
+
+    // 결정값에 따라 billable 시간 재계산
+    let billableIn = log.billable_clock_in;
+    let billableOut = log.billable_clock_out;
+
+    // 출근 결정 (지각자에 대해서만 의미 있음)
+    if (clock_in_decision === 'scheduled' && log.scheduled_clock_in) {
+      billableIn = log.scheduled_clock_in; // 정시 처리 (봐줌)
+    } else if (clock_in_decision === 'actual') {
+      billableIn = log.clock_in; // 실제 처리 (지각 인정, 공제)
+    }
+
+    // 퇴근 결정 (연장/조퇴에 대해 의미 있음)
+    if (clock_out_decision === 'scheduled' && log.scheduled_clock_out) {
+      billableOut = log.scheduled_clock_out; // 정시 처리
+    } else if (clock_out_decision === 'actual') {
+      billableOut = log.clock_out; // 실제 처리
+    }
+
+    // 업데이트
+    const result = await db.query(
+      `UPDATE attendance_logs 
+       SET status = $1, 
+           billable_clock_in = $2, 
+           billable_clock_out = $3 
+       WHERE id = $4 
+       RETURNING *`,
+      [status, billableIn, billableOut, req.params.id]
+    );
+
     res.json({ success: true, ...result.rows[0] });
   } catch (err) {
+    console.error('approve error:', err);
     res.status(500).json({ error: err.message });
   }
 });
