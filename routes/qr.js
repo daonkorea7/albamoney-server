@@ -188,6 +188,61 @@ router.put('/workplace/:workplace_id/grace', async (req, res) => {
   }
 });
 
+// ✅ 사업장 이름 변경 (신규)
+// PUT /api/qr/workplace/:workplace_id/name
+// Body: { name: string, user_id: number }
+router.put('/workplace/:workplace_id/name', async (req, res) => {
+  try {
+    const { workplace_id } = req.params;
+    const { name, user_id } = req.body;
+
+    // 입력 검증
+    if (!name || name.trim().length === 0) {
+      return res.status(400).json({ error: '사업장 이름을 입력해주세요' });
+    }
+
+    if (name.trim().length > 50) {
+      return res.status(400).json({ error: '사업장 이름은 50자 이내로 입력해주세요' });
+    }
+
+    // 소유권 확인 (본인 사업장만 수정 가능)
+    if (user_id) {
+      const check = await db.query(
+        `SELECT w.id FROM workplaces w
+         JOIN businesses b ON w.business_id = b.id
+         WHERE w.id = $1 AND b.owner_id = $2`,
+        [workplace_id, user_id]
+      );
+
+      if (check.rows.length === 0) {
+        return res.status(403).json({ error: '해당 사업장을 수정할 권한이 없습니다' });
+      }
+    }
+
+    // 이름 업데이트
+    const result = await db.query(
+      `UPDATE workplaces 
+       SET name = $1 
+       WHERE id = $2 
+       RETURNING *`,
+      [name.trim(), workplace_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: '사업장을 찾을 수 없습니다' });
+    }
+
+    res.json({ 
+      success: true, 
+      workplace: result.rows[0],
+      message: '사업장 이름이 변경되었습니다'
+    });
+  } catch (err) {
+    console.error('workplace name update error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ✅ QR 스캔으로 알바처 연결 (알바생용)
 router.post('/workplace/connect', async (req, res) => {
   const { user_id, workplace_id, qr_code, shift_id } = req.body;
