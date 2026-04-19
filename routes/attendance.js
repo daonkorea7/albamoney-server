@@ -21,8 +21,8 @@ async function getScheduledTimes(contract_id, date) {
 
     const { start_time, end_time } = result.rows[0];
     return {
-      scheduled_in: `${date}T${start_time}`,
-      scheduled_out: `${date}T${end_time}`,
+      scheduled_in: `${date}T${start_time}+09:00`,
+      scheduled_out: `${date}T${end_time}+09:00`,
     };
   } catch (err) {
     console.error('getScheduledTimes error:', err);
@@ -141,7 +141,7 @@ router.put('/checkout/:id', async (req, res) => {
     let clockOutTime;
     if (clock_out_time) {
       const today = new Date().toISOString().substring(0, 10);
-      clockOutTime = `${today}T${clock_out_time}:00`;
+      clockOutTime = `${today}T${clock_out_time}:00+09:00`;
     } else {
       clockOutTime = clock_out || new Date().toISOString();
     }
@@ -282,8 +282,8 @@ router.post('/save-day', async (req, res) => {
       return res.status(400).json({ error: '출근 시간이 필요합니다' });
     }
 
-    const clockIn = `${date}T${clock_in_time}:00`;
-    const clockOut = clock_out_time ? `${date}T${clock_out_time}:00` : null;
+    const clockIn = `${date}T${clock_in_time}:00+09:00`;
+    const clockOut = clock_out_time ? `${date}T${clock_out_time}:00+09:00` : null;
 
     const { scheduled_in, scheduled_out } = await getScheduledTimes(contract_id, date);
     const billable = calculateBillable(clockIn, clockOut, scheduled_in, scheduled_out);
