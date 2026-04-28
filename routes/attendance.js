@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const { sendPushToUser } = require('../utils/push');
 
 // =========================================================
 // 🆕 [v10] shift_id로 예정 시간 가져오기
@@ -33,14 +34,6 @@ async function getScheduledTimes(contract_id, date) {
 // =========================================================
 // 🆕 [v10] 자동 판정 규칙으로 billable 시간 계산
 // =========================================================
-// 규칙:
-// - 일찍 출근 → 정시 (billable = scheduled_in)
-// - 정시 출근 → 정시
-// - 지각 → 실제 (is_late = true, 사업자 승인 필요)
-// - 일찍 퇴근 → 실제 (is_early_leave = true, 사업자 승인 필요)
-// - 정시 퇴근 → 정시
-// - 늦게 퇴근 → 실제 (is_overtime = true, 사업자 승인 필요)
-// - scheduled 없으면 (자유근무) → actual 그대로
 function calculateBillable(actual_in, actual_out, scheduled_in, scheduled_out) {
   const result = {
     billable_in: actual_in,
@@ -50,48 +43,69 @@ function calculateBillable(actual_in, actual_out, scheduled_in, scheduled_out) {
     is_overtime: false,
   };
 
-  // 자유근무 (예정시간 없음) → 그대로
   if (!scheduled_in || !scheduled_out) {
     return result;
   }
 
-  // ============ 출근 시간 ============
   if (actual_in) {
     const actualInTime = new Date(actual_in).getTime();
     const scheduledInTime = new Date(scheduled_in).getTime();
     const diffIn = actualInTime - scheduledInTime;
 
     if (diffIn <= 0) {
-      // 일찍/정시 출근 → 정시 처리
       result.billable_in = scheduled_in;
     } else {
-      // 지각 → 실제 시간 (사업자 승인 시 변경 가능)
       result.billable_in = actual_in;
       result.is_late = true;
     }
   }
 
-  // ============ 퇴근 시간 ============
   if (actual_out) {
     const actualOutTime = new Date(actual_out).getTime();
     const scheduledOutTime = new Date(scheduled_out).getTime();
     const diffOut = actualOutTime - scheduledOutTime;
 
     if (diffOut > 0) {
-      // 늦게 퇴근 → 정시 처리 (사업자 승인 시 연장근무 인정 가능)
       result.billable_out = scheduled_out;
       result.is_overtime = true;
     } else if (diffOut < 0) {
-      // 일찍 퇴근 → 실제 (공제, 사업자 승인 시 봐줄 수 있음)
       result.billable_out = actual_out;
       result.is_early_leave = true;
     } else {
-      // 정시 퇴근
       result.billable_out = scheduled_out;
     }
   }
 
   return result;
+}
+
+// =========================================================
+// 🔔 [v11] attendance_log id로 사업자/알바생 정보 조회 (알림용)
+// =========================================================
+async function getAttendanceParties(attendance_id) {
+  try {
+    const result = await db.query(`
+      SELECT 
+        al.id AS attendance_id,
+        al.contract_id,
+        worker.id AS worker_id,
+        worker.name AS worker_name,
+        owner.id AS owner_id,
+        w.name AS workplace_name
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      JOIN users worker ON sc.user_id = worker.id
+      JOIN workplaces w ON sc.workplace_id = w.id
+      JOIN businesses b ON w.business_id = b.id
+      JOIN users owner ON b.owner_id = owner.id
+      WHERE al.id = $1
+    `, [attendance_id]);
+
+    return result.rows[0] || null;
+  } catch (err) {
+    console.error('getAttendanceParties error:', err);
+    return null;
+  }
 }
 
 // ✅ 출근 체크
@@ -127,7 +141,26 @@ router.post('/checkin', async (req, res) => {
        scheduled_in, scheduled_out, 
        billable.billable_in, billable.is_late]
     );
-    res.json({ success: true, ...result.rows[0] });
+
+    const saved = result.rows[0];
+
+    // 🔔 pending 상태로 저장된 경우 사업자에게 출근 승인 요청 알림
+    if (saved.status === 'pending') {
+      const parties = await getAttendanceParties(saved.id);
+      if (parties && parties.owner_id) {
+        await sendPushToUser(db, parties.owner_id, {
+          title: `🔴 ${parties.worker_name}님 출근 승인 요청`,
+          body: `${parties.workplace_name}에서 출근 요청이 왔어요`,
+          data: {
+            type: 'checkin_request',
+            attendance_id: saved.id,
+            screen: 'owner/approve',
+          },
+        });
+      }
+    }
+
+    res.json({ success: true, ...saved });
   } catch (err) {
     console.error('checkin error:', err);
     res.status(500).json({ error: err.message });
@@ -146,7 +179,6 @@ router.put('/checkout/:id', async (req, res) => {
       clockOutTime = clock_out || new Date().toISOString();
     }
 
-    // 기존 로그에서 정보 가져오기
     const logResult = await db.query(
       `SELECT clock_in, scheduled_clock_in, scheduled_clock_out
        FROM attendance_logs WHERE id = $1`,
@@ -185,7 +217,26 @@ router.put('/checkout/:id', async (req, res) => {
          req.params.id]
       );
     }
-    res.json({ success: true, ...result.rows[0] });
+
+    const saved = result.rows[0];
+
+    // 🔔 pending 상태로 저장된 경우 사업자에게 퇴근 승인 요청 알림
+    if (saved.status === 'pending') {
+      const parties = await getAttendanceParties(saved.id);
+      if (parties && parties.owner_id) {
+        await sendPushToUser(db, parties.owner_id, {
+          title: `🔴 ${parties.worker_name}님 퇴근 승인 요청`,
+          body: `${parties.workplace_name}에서 퇴근 요청이 왔어요`,
+          data: {
+            type: 'checkout_request',
+            attendance_id: saved.id,
+            screen: 'owner/approve',
+          },
+        });
+      }
+    }
+
+    res.json({ success: true, ...saved });
   } catch (err) {
     console.error('checkout error:', err);
     res.status(500).json({ error: err.message });
@@ -215,15 +266,9 @@ router.get('/:contract_id', async (req, res) => {
 });
 
 // ✅ 수동 출퇴근 승인/거절 (v10: 시간 결정 옵션 추가)
-// Body: { 
-//   status: 'approved' | 'rejected',
-//   clock_in_decision?: 'scheduled' | 'actual',   // 지각자 결정
-//   clock_out_decision?: 'scheduled' | 'actual'   // 연장/조퇴자 결정
-// }
 router.put('/approve/:id', async (req, res) => {
   const { status, clock_in_decision, clock_out_decision } = req.body;
   try {
-    // 기존 log 정보 가져오기
     const logResult = await db.query(
       `SELECT clock_in, clock_out, scheduled_clock_in, scheduled_clock_out,
               billable_clock_in, billable_clock_out,
@@ -238,25 +283,21 @@ router.put('/approve/:id', async (req, res) => {
 
     const log = logResult.rows[0];
 
-    // 결정값에 따라 billable 시간 재계산
     let billableIn = log.billable_clock_in;
     let billableOut = log.billable_clock_out;
 
-    // 출근 결정 (지각자에 대해서만 의미 있음)
     if (clock_in_decision === 'scheduled' && log.scheduled_clock_in) {
-      billableIn = log.scheduled_clock_in; // 정시 처리 (봐줌)
+      billableIn = log.scheduled_clock_in;
     } else if (clock_in_decision === 'actual') {
-      billableIn = log.clock_in; // 실제 처리 (지각 인정, 공제)
+      billableIn = log.clock_in;
     }
 
-    // 퇴근 결정 (연장/조퇴에 대해 의미 있음)
     if (clock_out_decision === 'scheduled' && log.scheduled_clock_out) {
-      billableOut = log.scheduled_clock_out; // 정시 처리
+      billableOut = log.scheduled_clock_out;
     } else if (clock_out_decision === 'actual') {
-      billableOut = log.clock_out; // 실제 처리
+      billableOut = log.clock_out;
     }
 
-    // 업데이트
     const result = await db.query(
       `UPDATE attendance_logs 
        SET status = $1, 
@@ -267,7 +308,40 @@ router.put('/approve/:id', async (req, res) => {
       [status, billableIn, billableOut, req.params.id]
     );
 
-    res.json({ success: true, ...result.rows[0] });
+    const saved = result.rows[0];
+
+    // 🔔 알바생에게 승인 결과 알림
+    const parties = await getAttendanceParties(saved.id);
+    if (parties && parties.worker_id) {
+      const isCheckout = !!saved.clock_out;
+      const action = isCheckout ? '퇴근' : '출근';
+
+      if (status === 'approved') {
+        await sendPushToUser(db, parties.worker_id, {
+          title: `✅ ${action} 승인됐어요`,
+          body: `${parties.workplace_name}의 ${action} 요청이 승인됐어요`,
+          data: {
+            type: 'attendance_approved',
+            attendance_id: saved.id,
+            contract_id: saved.contract_id,
+            screen: 'worker/qr-checkin',
+          },
+        });
+      } else if (status === 'rejected') {
+        await sendPushToUser(db, parties.worker_id, {
+          title: `❌ ${action} 요청이 거절됐어요`,
+          body: `${parties.workplace_name}의 ${action} 요청이 거절됐어요`,
+          data: {
+            type: 'attendance_rejected',
+            attendance_id: saved.id,
+            contract_id: saved.contract_id,
+            screen: 'worker/qr-checkin',
+          },
+        });
+      }
+    }
+
+    res.json({ success: true, ...saved });
   } catch (err) {
     console.error('approve error:', err);
     res.status(500).json({ error: err.message });
