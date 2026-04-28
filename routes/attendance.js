@@ -144,7 +144,6 @@ router.post('/checkin', async (req, res) => {
 
     const saved = result.rows[0];
 
-    // 🔔 pending 상태로 저장된 경우 사업자에게 출근 승인 요청 알림
     if (saved.status === 'pending') {
       const parties = await getAttendanceParties(saved.id);
       if (parties && parties.owner_id) {
@@ -220,7 +219,6 @@ router.put('/checkout/:id', async (req, res) => {
 
     const saved = result.rows[0];
 
-    // 🔔 pending 상태로 저장된 경우 사업자에게 퇴근 승인 요청 알림
     if (saved.status === 'pending') {
       const parties = await getAttendanceParties(saved.id);
       if (parties && parties.owner_id) {
@@ -310,7 +308,6 @@ router.put('/approve/:id', async (req, res) => {
 
     const saved = result.rows[0];
 
-    // 🔔 알바생에게 승인 결과 알림
     const parties = await getAttendanceParties(saved.id);
     if (parties && parties.worker_id) {
       const isCheckout = !!saved.clock_out;
@@ -348,7 +345,7 @@ router.put('/approve/:id', async (req, res) => {
   }
 });
 
-// ✅ 날짜+시간 지정 출퇴근 저장
+// ✅ 날짜+시간 지정 출퇴근 저장 (수동 출퇴근 요청도 여기로 옴)
 router.post('/save-day', async (req, res) => {
   const { contract_id, date, clock_in_time, clock_out_time, status } = req.body;
   try {
@@ -397,7 +394,34 @@ router.post('/save-day', async (req, res) => {
          billable.is_late, billable.is_early_leave, billable.is_overtime]
       );
     }
-    res.json({ success: true, log: result.rows[0] });
+
+    const saved = result.rows[0];
+
+    // 🔔 [v11] 수동 입력 출퇴근이 'pending'으로 저장된 경우 사업자에게 알림
+    if (saved.status === 'pending') {
+      const parties = await getAttendanceParties(saved.id);
+      if (parties && parties.owner_id) {
+        const isCheckout = !!saved.clock_out;
+        const title = isCheckout 
+          ? `🔴 ${parties.worker_name}님 퇴근 승인 요청`
+          : `🔴 ${parties.worker_name}님 출근 승인 요청`;
+        const body = isCheckout
+          ? `${parties.workplace_name}에서 퇴근 요청이 왔어요`
+          : `${parties.workplace_name}에서 출근 요청이 왔어요`;
+
+        await sendPushToUser(db, parties.owner_id, {
+          title,
+          body,
+          data: {
+            type: isCheckout ? 'checkout_request' : 'checkin_request',
+            attendance_id: saved.id,
+            screen: 'owner/approve',
+          },
+        });
+      }
+    }
+
+    res.json({ success: true, log: saved });
   } catch (err) {
     console.error('save-day error:', err);
     res.status(500).json({ error: err.message });
