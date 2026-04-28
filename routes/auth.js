@@ -37,4 +37,36 @@ router.get('/:firebase_uid', async (req, res) => {
   }
 });
 
+// 🔔 Push Token 저장 (앱 로그인 시 호출)
+router.post('/push-token', async (req, res) => {
+  const { user_id, push_token } = req.body;
+
+  if (!user_id || !push_token) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_id와 push_token은 필수입니다',
+    });
+  }
+
+  try {
+    const result = await db.query(
+      'UPDATE users SET push_token = $1 WHERE id = $2 RETURNING id, push_token',
+      [push_token, user_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: '해당 user_id의 사용자를 찾을 수 없습니다',
+      });
+    }
+
+    console.log(`✅ Push Token 저장 완료 - user_id: ${user_id}`);
+    res.json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    console.error('❌ Push Token 저장 실패:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
