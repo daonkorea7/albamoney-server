@@ -270,6 +270,170 @@ router.get('/income/monthly/:user_id', async (req, res) => {
   }
 });
 
+// =========================================================
+// ✅ [v15] 급여내역 상세 API (급여내역 화면 pay.tsx 전용)
+// GET /api/contract/income/detail/:user_id?year=&month=
+// - 합계/알바처별은 /income/monthly 와 "완전히 동일한 계산식" 사용
+//   → home 화면 금액과 100% 일치 (QR=approved, manual=non-rejected, 실제 clock 시간 기준)
+// - 추가로 일별 출퇴근 상세(records) 함께 반환 (상세 기록 표시용)
+// =========================================================
+router.get('/income/detail/:user_id', async (req, res) => {
+  const { user_id } = req.params;
+  const { year, month } = req.query;
+
+  const y = year || new Date().getFullYear();
+  const m = month || (new Date().getMonth() + 1);
+
+  try {
+    // ---- 알바처별 합계 (monthly 와 동일 로직) ----
+    const manualResult = await db.query(`
+      SELECT 
+        sc.id as contract_id, sc.workplace_name, sc.hourly_wage,
+        COALESCE(SUM(EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600), 0) as total_hours
+      FROM staff_contracts sc
+      LEFT JOIN attendance_logs al 
+        ON al.contract_id = sc.id
+        AND EXTRACT(YEAR FROM al.clock_in) = $2
+        AND EXTRACT(MONTH FROM al.clock_in) = $3
+        AND al.clock_out IS NOT NULL
+        AND al.status != 'rejected'
+      WHERE sc.user_id = $1 AND sc.workplace_type = 'manual' AND sc.status = 'active'
+      GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
+    `, [user_id, y, m]);
+
+    const platformResult = await db.query(`
+      SELECT 
+        sc.id as contract_id, sc.workplace_name,
+        COALESCE(SUM(pe.amount), 0) as total_amount
+      FROM staff_contracts sc
+      LEFT JOIN platform_earnings pe
+        ON pe.contract_id = sc.id
+        AND EXTRACT(YEAR FROM pe.earned_date) = $2
+        AND EXTRACT(MONTH FROM pe.earned_date) = $3
+      WHERE sc.user_id = $1 AND sc.workplace_type = 'platform' AND sc.status = 'active'
+      GROUP BY sc.id, sc.workplace_name
+    `, [user_id, y, m]);
+
+    const qrResult = await db.query(`
+      SELECT 
+        sc.id as contract_id, sc.workplace_name, sc.hourly_wage,
+        COALESCE(SUM(EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600), 0) as total_hours
+      FROM staff_contracts sc
+      LEFT JOIN attendance_logs al 
+        ON al.contract_id = sc.id
+        AND EXTRACT(YEAR FROM al.clock_in) = $2
+        AND EXTRACT(MONTH FROM al.clock_in) = $3
+        AND al.clock_out IS NOT NULL
+        AND al.status = 'approved'
+      WHERE sc.user_id = $1 AND sc.workplace_type = 'qr' AND sc.status = 'active'
+      GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
+    `, [user_id, y, m]);
+
+    let manualTotal = 0;
+    const manualList = manualResult.rows.map(row => {
+      const earned = Math.round(row.hourly_wage * row.total_hours);
+      manualTotal += earned;
+      return {
+        contract_id: row.contract_id,
+        workplace_name: row.workplace_name,
+        hourly_wage: row.hourly_wage,
+        total_hours: parseFloat(row.total_hours).toFixed(1),
+        earned,
+        type: 'manual'
+      };
+    });
+
+    let platformTotal = 0;
+    const platformList = platformResult.rows.map(row => {
+      const amount = parseInt(row.total_amount);
+      platformTotal += amount;
+      return {
+        contract_id: row.contract_id,
+        workplace_name: row.workplace_name,
+        total_amount: amount,
+        type: 'platform'
+      };
+    });
+
+    let qrTotal = 0;
+    const qrList = qrResult.rows.map(row => {
+      const earned = Math.round(row.hourly_wage * row.total_hours);
+      qrTotal += earned;
+      return {
+        contract_id: row.contract_id,
+        workplace_name: row.workplace_name,
+        hourly_wage: row.hourly_wage,
+        total_hours: parseFloat(row.total_hours).toFixed(1),
+        earned,
+        type: 'qr'
+      };
+    });
+
+    const grossTotal = manualTotal + platformTotal + qrTotal;
+    const taxAmount = Math.round(grossTotal * 0.033);
+    const netTotal = grossTotal - taxAmount;
+
+    // ---- 일별 상세 기록 (QR + 직접입력 출퇴근) ----
+    //  monthly 합계와 동일한 status/시간 기준 사용
+    const recordsResult = await db.query(`
+      SELECT
+        al.id,
+        al.clock_in,
+        al.clock_out,
+        sc.workplace_name,
+        sc.workplace_type AS type,
+        sc.hourly_wage,
+        EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600 AS hours
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      WHERE sc.user_id = $1
+        AND sc.status = 'active'
+        AND sc.workplace_type IN ('qr', 'manual')
+        AND al.clock_out IS NOT NULL
+        AND EXTRACT(YEAR FROM al.clock_in) = $2
+        AND EXTRACT(MONTH FROM al.clock_in) = $3
+        AND (
+          (sc.workplace_type = 'qr' AND al.status = 'approved')
+          OR (sc.workplace_type = 'manual' AND al.status != 'rejected')
+        )
+      ORDER BY al.clock_in DESC
+    `, [user_id, y, m]);
+
+    const records = recordsResult.rows.map(r => {
+      const hours = Math.max(0, parseFloat(r.hours) || 0);
+      const wage = parseInt(r.hourly_wage, 10) || 0;
+      return {
+        id: r.id,
+        workplace_name: r.workplace_name,
+        type: r.type,
+        hourly_wage: wage,
+        hours: Math.round(hours * 100) / 100,
+        pay: Math.round(wage * hours),
+        clock_in: r.clock_in,
+        clock_out: r.clock_out,
+      };
+    });
+
+    res.json({
+      success: true,
+      year: parseInt(y),
+      month: parseInt(m),
+      manual: manualList,
+      platform: platformList,
+      qr: qrList,
+      records,
+      summary: {
+        gross_total: grossTotal,
+        tax_amount: taxAmount,
+        net_total: netTotal
+      }
+    });
+  } catch (err) {
+    console.error('income detail error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 기존 근로계약 API
 router.post('/', async (req, res) => {
   const { user_id, workplace_id, hourly_wage, work_days } = req.body;
