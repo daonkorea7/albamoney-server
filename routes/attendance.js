@@ -486,4 +486,104 @@ router.get('/pending/:business_id', async (req, res) => {
   }
 });
 
+// =========================================================
+// 🆕 [v15] 알바생 급여내역 집계 (실데이터)
+// GET /api/attendance/income/:user_id?period=day|week|month
+// - 사업자 화면과 동일한 계산식: hours = (billable_out - billable_in)/3600, pay = round(hours * wage)
+// - status='approved' & 퇴근(billable_clock_out)까지 찍힌 기록만 집계
+// - 기간 필터는 한국시간(Asia/Seoul) 기준
+// 반환: { total_pay, tax(3.3%), net_pay, workplaces[], records[] }
+// =========================================================
+router.get('/income/:user_id', async (req, res) => {
+  try {
+    const { user_id } = req.params;
+    const period = ['day', 'week', 'month'].includes(req.query.period)
+      ? req.query.period
+      : 'month';
+
+    // 기간 필터 (KST 기준) — billable_clock_in을 기준 날짜로 사용
+    let periodFilter;
+    if (period === 'day') {
+      periodFilter = `(al.billable_clock_in AT TIME ZONE 'Asia/Seoul')::date
+                      = (now() AT TIME ZONE 'Asia/Seoul')::date`;
+    } else if (period === 'week') {
+      periodFilter = `date_trunc('week', al.billable_clock_in AT TIME ZONE 'Asia/Seoul')
+                      = date_trunc('week', now() AT TIME ZONE 'Asia/Seoul')`;
+    } else {
+      periodFilter = `date_trunc('month', al.billable_clock_in AT TIME ZONE 'Asia/Seoul')
+                      = date_trunc('month', now() AT TIME ZONE 'Asia/Seoul')`;
+    }
+
+    const result = await db.query(`
+      SELECT
+        al.id,
+        al.billable_clock_in,
+        al.billable_clock_out,
+        COALESCE(w.name, sc.workplace_name) AS workplace_name,
+        sc.hourly_wage,
+        CASE
+          WHEN al.billable_clock_out IS NOT NULL AND al.billable_clock_in IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (al.billable_clock_out - al.billable_clock_in)) / 3600
+          ELSE 0
+        END AS hours
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      LEFT JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE sc.user_id = $1
+        AND al.status = 'approved'
+        AND al.billable_clock_out IS NOT NULL
+        AND ${periodFilter}
+      ORDER BY al.billable_clock_in DESC
+    `, [user_id]);
+
+    // 레코드별 급여 계산 + 일별 상세
+    const records = result.rows.map((r) => {
+      const hours = Math.max(0, parseFloat(r.hours) || 0);
+      const wage = parseInt(r.hourly_wage, 10) || 0;
+      const pay = Math.round(hours * wage);
+      return {
+        id: r.id,
+        workplace_name: r.workplace_name || '알바처',
+        hourly_wage: wage,
+        hours: Math.round(hours * 100) / 100, // 소수 2자리
+        pay,
+        clock_in: r.billable_clock_in,
+        clock_out: r.billable_clock_out,
+      };
+    });
+
+    // 알바처별 합계
+    const wpMap = {};
+    for (const rec of records) {
+      const key = rec.workplace_name;
+      if (!wpMap[key]) {
+        wpMap[key] = { name: key, hourly_wage: rec.hourly_wage, total_hours: 0, total_pay: 0 };
+      }
+      wpMap[key].total_hours += rec.hours;
+      wpMap[key].total_pay += rec.pay;
+      if (rec.hourly_wage) wpMap[key].hourly_wage = rec.hourly_wage; // 최근 시급
+    }
+    const workplaces = Object.values(wpMap)
+      .map((w) => ({ ...w, total_hours: Math.round(w.total_hours * 10) / 10 }))
+      .sort((a, b) => b.total_pay - a.total_pay);
+
+    const total_pay = records.reduce((s, r) => s + r.pay, 0);
+    const tax = Math.floor(total_pay * 0.033);
+    const net_pay = total_pay - tax;
+
+    res.json({
+      success: true,
+      period,
+      total_pay,
+      tax,
+      net_pay,
+      workplaces,
+      records,
+    });
+  } catch (err) {
+    console.error('income error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
