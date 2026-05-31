@@ -188,4 +188,108 @@ router.delete('/:contract_id', async (req, res) => {
   }
 });
 
+// =========================================================
+// 🆕 6. 사업자 홈 대시보드 요약 (실제 DB 연동)
+//    GET /api/staff/dashboard/:business_id
+//    반환: 등록 알바생 수 / 오늘 출근 / 오늘 총 근무시간 /
+//          이번달 급여·원천징수 / 승인 대기 / 오늘 출퇴근 현황 목록
+//    ※ '오늘' / '이번달'은 한국시간(Asia/Seoul) 기준
+// =========================================================
+router.get('/dashboard/:business_id', async (req, res) => {
+  try {
+    const { business_id } = req.params;
+
+    // (1) 등록 알바생 수 (active)
+    const staffCountQ = await pool.query(`
+      SELECT COUNT(*)::int AS cnt
+      FROM staff_contracts sc
+      JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE w.business_id = $1 AND sc.status = 'active'
+    `, [business_id]);
+    const staff_count = staffCountQ.rows[0].cnt;
+
+    // (2) 오늘 출퇴근 현황 (한국시간 기준 오늘 clock_in 기록)
+    const todayQ = await pool.query(`
+      SELECT 
+        al.id, al.clock_in, al.clock_out, al.status,
+        u.name AS worker_name, w.name AS workplace_name
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      JOIN users u ON sc.user_id = u.id
+      JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE w.business_id = $1
+        AND (al.clock_in AT TIME ZONE 'Asia/Seoul')::date
+            = (now() AT TIME ZONE 'Asia/Seoul')::date
+      ORDER BY al.clock_in ASC
+    `, [business_id]);
+    const today_attendance = todayQ.rows;
+
+    // 오늘 출근 인원 (거절 제외)
+    const today_present = today_attendance.filter(a => a.status !== 'rejected').length;
+
+    // (3) 오늘 총 근무시간 (approved, 진행중이면 현재까지)
+    const hoursQ = await pool.query(`
+      SELECT COALESCE(SUM(
+        EXTRACT(EPOCH FROM (COALESCE(al.clock_out, now()) - al.clock_in)) / 3600
+      ), 0) AS hours
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE w.business_id = $1
+        AND al.status = 'approved'
+        AND (al.clock_in AT TIME ZONE 'Asia/Seoul')::date
+            = (now() AT TIME ZONE 'Asia/Seoul')::date
+    `, [business_id]);
+    const today_hours = Math.round(Number(hoursQ.rows[0].hours) * 10) / 10;
+
+    // (4) 이번달 급여 지급 예정 + 원천징수 (approved & 퇴근완료, billable 우선)
+    const payQ = await pool.query(`
+      SELECT COALESCE(SUM(
+        (EXTRACT(EPOCH FROM (
+          COALESCE(al.billable_clock_out, al.clock_out)
+          - COALESCE(al.billable_clock_in, al.clock_in)
+        )) / 3600) * sc.hourly_wage
+      ), 0) AS gross
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE w.business_id = $1
+        AND al.status = 'approved'
+        AND al.clock_out IS NOT NULL
+        AND EXTRACT(MONTH FROM (al.clock_in AT TIME ZONE 'Asia/Seoul'))
+            = EXTRACT(MONTH FROM (now() AT TIME ZONE 'Asia/Seoul'))
+        AND EXTRACT(YEAR FROM (al.clock_in AT TIME ZONE 'Asia/Seoul'))
+            = EXTRACT(YEAR FROM (now() AT TIME ZONE 'Asia/Seoul'))
+    `, [business_id]);
+    const month_gross = Math.round(Number(payQ.rows[0].gross));
+    const month_tax = Math.round(month_gross * 0.033);
+
+    // (5) 승인 대기 건수
+    const pendingQ = await pool.query(`
+      SELECT COUNT(*)::int AS cnt
+      FROM attendance_logs al
+      JOIN staff_contracts sc ON al.contract_id = sc.id
+      JOIN workplaces w ON sc.workplace_id = w.id
+      WHERE w.business_id = $1 AND al.status = 'pending'
+    `, [business_id]);
+    const pending_count = pendingQ.rows[0].cnt;
+
+    res.json({
+      success: true,
+      dashboard: {
+        staff_count,
+        today_present,
+        today_hours,
+        month_gross,
+        month_tax,
+        pending_count,
+        today_attendance,
+      },
+    });
+  } catch (err) {
+    console.error('대시보드 조회 에러:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
