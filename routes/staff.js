@@ -172,6 +172,49 @@ router.put('/shift/:contract_id', async (req, res) => {
   }
 });
 
+// =========================================================
+// 🆕 시급 설정/변경 (사람별)
+//    PUT /api/staff/wage/:contract_id   body: { hourly_wage }
+//    QR로 연결된 알바생은 시급이 0으로 시작하므로 사업자가 여기서 설정
+// =========================================================
+router.put('/wage/:contract_id', async (req, res) => {
+  try {
+    const { contract_id } = req.params;
+    const { hourly_wage } = req.body;
+
+    const wage = parseInt(hourly_wage, 10);
+    if (isNaN(wage) || wage <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: '시급을 올바르게 입력해주세요',
+      });
+    }
+
+    const result = await pool.query(`
+      UPDATE staff_contracts
+      SET hourly_wage = $1
+      WHERE id = $2
+      RETURNING *
+    `, [wage, contract_id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: '알바생을 찾을 수 없습니다',
+      });
+    }
+
+    res.json({
+      success: true,
+      contract: result.rows[0],
+      message: '시급이 설정됐어요',
+    });
+  } catch (err) {
+    console.error('알바생 시급 변경 에러:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // 5. 알바생 해고 (계약 삭제)
 router.delete('/:contract_id', async (req, res) => {
   try {
