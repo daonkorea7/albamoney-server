@@ -335,4 +335,86 @@ router.get('/dashboard/:business_id', async (req, res) => {
   }
 });
 
+// =========================================================
+// 🆕 7. [v15] 사업자 월별 급여관리 (급여관리 화면 owner/pay.tsx 전용)
+//    GET /api/staff/payroll/:business_id?year=&month=
+//    - 대시보드(/dashboard (4))와 "동일한 계산식": 인정시간(billable, 없으면 실제) × 시급
+//      → owner 홈 화면 '이번달 총 급여 지급 예정'과 100% 일치
+//    - 알바생별 급여 + 합계(총지급 / 원천징수 3.3% / 실지급) 반환
+//    - '이번달' 판정은 한국시간(Asia/Seoul) 기준
+// =========================================================
+router.get('/payroll/:business_id', async (req, res) => {
+  try {
+    const { business_id } = req.params;
+    const y = parseInt(req.query.year, 10) || new Date().getFullYear();
+    const m = parseInt(req.query.month, 10) || (new Date().getMonth() + 1);
+
+    const result = await pool.query(`
+      SELECT
+        sc.id AS contract_id,
+        u.name AS worker_name,
+        sc.hourly_wage,
+        COALESCE(SUM(
+          EXTRACT(EPOCH FROM (
+            COALESCE(al.billable_clock_out, al.clock_out)
+            - COALESCE(al.billable_clock_in, al.clock_in)
+          )) / 3600
+        ), 0) AS hours
+      FROM staff_contracts sc
+      JOIN workplaces w ON sc.workplace_id = w.id
+      JOIN users u ON sc.user_id = u.id
+      LEFT JOIN attendance_logs al
+        ON al.contract_id = sc.id
+        AND al.status = 'approved'
+        AND al.clock_out IS NOT NULL
+        AND EXTRACT(YEAR FROM (al.clock_in AT TIME ZONE 'Asia/Seoul')) = $2
+        AND EXTRACT(MONTH FROM (al.clock_in AT TIME ZONE 'Asia/Seoul')) = $3
+      WHERE w.business_id = $1 AND sc.status = 'active'
+      GROUP BY sc.id, u.name, sc.hourly_wage
+      ORDER BY u.name ASC
+    `, [business_id, y, m]);
+
+    let rawGross = 0;
+    const staff = result.rows.map((r) => {
+      const hours = Math.max(0, parseFloat(r.hours) || 0);
+      const wage = parseInt(r.hourly_wage, 10) || 0;
+      const raw = hours * wage;
+      rawGross += raw;
+      const gross = Math.round(raw);
+      const tax = Math.round(gross * 0.033);
+      return {
+        contract_id: r.contract_id,
+        worker_name: r.worker_name,
+        hourly_wage: wage,
+        hours: Math.round(hours * 10) / 10, // 소수 1자리
+        gross,
+        net: gross - tax,
+      };
+    });
+
+    // 합계는 raw 합을 한 번에 반올림 → owner 홈 대시보드 금액과 동일
+    const gross_total = Math.round(rawGross);
+    const tax_total = Math.round(gross_total * 0.033);
+    const net_total = gross_total - tax_total;
+
+    // 급여 많은 순 정렬
+    staff.sort((a, b) => b.gross - a.gross);
+
+    res.json({
+      success: true,
+      year: y,
+      month: m,
+      summary: {
+        gross_total,
+        tax_amount: tax_total,
+        net_total,
+      },
+      staff,
+    });
+  } catch (err) {
+    console.error('급여관리 조회 에러:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
