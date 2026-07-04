@@ -21,6 +21,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/attendance', require('./routes/attendance'));
 app.use('/api/payroll', require('./routes/payroll'));
 app.use('/api/contract', require('./routes/contract'));
+app.use('/api/contract-doc', require('./routes/contractDoc'));
 app.use('/api/qr', require('./routes/qr'));
 app.use('/api/staff', require('./routes/staff'));
 app.use('/api/shift', require('./routes/shift'));
