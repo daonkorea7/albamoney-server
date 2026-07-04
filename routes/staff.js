@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 
-// 1. 내 사업장에 등록된 알바생 목록 조회 (시간대 정보 포함)
+// 1. 내 사업장에 등록된 알바생 목록 조회 (시간대 + 계약 상태 포함)
 router.get('/list/:business_id', async (req, res) => {
   try {
     const { business_id } = req.params;
@@ -39,7 +39,14 @@ router.get('/list/:business_id', async (req, res) => {
           FROM attendance_logs al
           WHERE al.contract_id = sc.id
             AND al.clock_out IS NULL
-        ) AS working_now
+        ) AS working_now,
+        (
+          SELECT ec.status
+          FROM employment_contracts ec
+          WHERE ec.staff_contract_id = sc.id
+          ORDER BY ec.created_at DESC
+          LIMIT 1
+        ) AS contract_status
       FROM staff_contracts sc
       JOIN users u ON sc.user_id = u.id
       JOIN workplaces w ON sc.workplace_id = w.id
