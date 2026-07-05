@@ -28,11 +28,12 @@ function isValidBizNumber(raw) {
 
 // ============================================
 // 🔧 사업장(workplace) 생성 헬퍼 (본점/지점 공용)
+// 기본 출퇴근 방식 = 'both' (QR·수동 둘 다) — 사업자가 원하면 나중에 조일 수 있음
 // ============================================
 async function createWorkplace({
   business_id,
   name,
-  attendance_mode = 'qr',
+  attendance_mode = 'both',
   grace_enabled = false,
   grace_minutes = 0,
   is_main = false,
@@ -159,8 +160,9 @@ router.post('/workplace/create', async (req, res) => {
     }
     const business = bizResult.rows[0];
 
+    // 🔧 기본 출퇴근 방식 = 'both' (QR·수동 둘 다). 값이 없거나 이상하면 both로.
     const validModes = ['qr', 'manual', 'both'];
-    const mode = validModes.includes(attendance_mode) ? attendance_mode : 'qr';
+    const mode = validModes.includes(attendance_mode) ? attendance_mode : 'both';
 
     const graceEnabled = grace_enabled === true;
     const graceMinutes = graceEnabled ? (parseInt(grace_minutes) || 10) : 0;
