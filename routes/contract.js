@@ -216,16 +216,18 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       GROUP BY sc.id, sc.workplace_name
     `, [user_id, y, m]);
 
-    // QR 알바처 수입
+    // QR 알바처 수입 (workplaces JOIN으로 attendance_mode 포함)
     const qrResult = await db.query(`
       SELECT 
         sc.id as contract_id,
         sc.workplace_name,
         sc.hourly_wage,
+        w.attendance_mode,
         COALESCE(SUM(
           EXTRACT(EPOCH FROM (al.clock_out - al.clock_in)) / 3600
         ), 0) as total_hours
       FROM staff_contracts sc
+      LEFT JOIN workplaces w ON sc.workplace_id = w.id
       LEFT JOIN attendance_logs al 
         ON al.contract_id = sc.id
         AND EXTRACT(YEAR FROM al.clock_in) = $2
@@ -235,7 +237,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       WHERE sc.user_id = $1
         AND sc.workplace_type = 'qr'
         AND sc.status = 'active'
-      GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
+      GROUP BY sc.id, sc.workplace_name, sc.hourly_wage, w.attendance_mode
     `, [user_id, y, m]);
 
     // 직접입력 수입 계산
@@ -267,7 +269,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       };
     });
 
-    // QR 수입 계산
+    // QR 수입 계산 (attendance_mode 포함)
     let qrTotal = 0;
     const qrList = qrResult.rows.map(row => {
       const earned = Math.round(row.hourly_wage * row.total_hours);
@@ -278,7 +280,8 @@ router.get('/income/monthly/:user_id', async (req, res) => {
         hourly_wage: row.hourly_wage,
         total_hours: parseFloat(row.total_hours).toFixed(1),
         earned,
-        type: 'qr'
+        type: 'qr',
+        attendance_mode: row.attendance_mode || 'qr'
       };
     });
 
