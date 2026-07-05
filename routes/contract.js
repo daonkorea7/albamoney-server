@@ -99,14 +99,14 @@ router.delete('/workplace/:contract_id', async (req, res) => {
   }
 });
 
-// ✅ 플랫폼 수입 등록
+// ✅ 플랫폼 수입 등록 (delivery_count = 건수, 선택 입력 → 없으면 null)
 router.post('/earnings', async (req, res) => {
-  const { contract_id, earned_date, amount, memo } = req.body;
+  const { contract_id, earned_date, amount, memo, delivery_count } = req.body;
   try {
     const result = await db.query(
-      `INSERT INTO platform_earnings (contract_id, earned_date, amount, memo)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [contract_id, earned_date, amount, memo || '']
+      `INSERT INTO platform_earnings (contract_id, earned_date, amount, memo, delivery_count)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [contract_id, earned_date, amount, memo || '', delivery_count ?? null]
     );
     res.json({ success: true, earning: result.rows[0] });
   } catch (err) {
@@ -115,7 +115,7 @@ router.post('/earnings', async (req, res) => {
   }
 });
 
-// ✅ 플랫폼 수입 목록 조회
+// ✅ 플랫폼 수입 목록 조회 (SELECT * 이므로 delivery_count 자동 포함)
 router.get('/earnings/:contract_id', async (req, res) => {
   const { contract_id } = req.params;
   const { year, month } = req.query;
@@ -130,6 +130,39 @@ router.get('/earnings/:contract_id', async (req, res) => {
     const result = await db.query(query, params);
     res.json({ success: true, earnings: result.rows });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 플랫폼 수입 수정 (금액/건수/메모 — 날짜는 변경 안 함)
+router.put('/earnings/:id', async (req, res) => {
+  const { id } = req.params;
+  const { amount, memo, delivery_count } = req.body;
+  try {
+    const result = await db.query(
+      `UPDATE platform_earnings
+       SET amount = $1, memo = $2, delivery_count = $3
+       WHERE id = $4 RETURNING *`,
+      [amount, memo || '', delivery_count ?? null, id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: '기록을 찾을 수 없습니다' });
+    }
+    res.json({ success: true, earning: result.rows[0] });
+  } catch (err) {
+    console.error('earnings update error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ 플랫폼 수입 삭제 (DB에서 실제 삭제)
+router.delete('/earnings/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await db.query(`DELETE FROM platform_earnings WHERE id = $1`, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('earnings delete error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -165,12 +198,13 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       GROUP BY sc.id, sc.workplace_name, sc.hourly_wage
     `, [user_id, y, m]);
 
-    // 플랫폼 알바처 수입
+    // 플랫폼 알바처 수입 (건수 합계 포함)
     const platformResult = await db.query(`
       SELECT 
         sc.id as contract_id,
         sc.workplace_name,
-        COALESCE(SUM(pe.amount), 0) as total_amount
+        COALESCE(SUM(pe.amount), 0) as total_amount,
+        COALESCE(SUM(pe.delivery_count), 0) as total_count
       FROM staff_contracts sc
       LEFT JOIN platform_earnings pe
         ON pe.contract_id = sc.id
@@ -219,7 +253,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
       };
     });
 
-    // 플랫폼 수입 계산
+    // 플랫폼 수입 계산 (건수 포함)
     let platformTotal = 0;
     const platformList = platformResult.rows.map(row => {
       const amount = parseInt(row.total_amount);
@@ -228,6 +262,7 @@ router.get('/income/monthly/:user_id', async (req, res) => {
         contract_id: row.contract_id,
         workplace_name: row.workplace_name,
         total_amount: amount,
+        total_count: parseInt(row.total_count) || 0,
         type: 'platform'
       };
     });
@@ -304,7 +339,8 @@ router.get('/income/detail/:user_id', async (req, res) => {
     const platformResult = await db.query(`
       SELECT 
         sc.id as contract_id, sc.workplace_name,
-        COALESCE(SUM(pe.amount), 0) as total_amount
+        COALESCE(SUM(pe.amount), 0) as total_amount,
+        COALESCE(SUM(pe.delivery_count), 0) as total_count
       FROM staff_contracts sc
       LEFT JOIN platform_earnings pe
         ON pe.contract_id = sc.id
@@ -351,6 +387,7 @@ router.get('/income/detail/:user_id', async (req, res) => {
         contract_id: row.contract_id,
         workplace_name: row.workplace_name,
         total_amount: amount,
+        total_count: parseInt(row.total_count) || 0,
         type: 'platform'
       };
     });
